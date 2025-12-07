@@ -12,7 +12,7 @@ if (!apiKey) {
 const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
 
 const generationConfig = {
-  maxOutputTokens: 1024,
+  maxOutputTokens: 2048, // Increased to prevent JSON truncation
   temperature: 0.75,
   topP: 0.9,
 };
@@ -92,13 +92,19 @@ interface MemoryContext {
     timestamp: number;
     status: string;
   }>;
+  chatHistory?: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: number;
+  }>;
 }
 
 export async function analyzeTransactionIntent(
   userMessage: string, 
   history: any[] = [],
   modelName: string = 'gemini-2.5-flash',
-  memoryContext: MemoryContext | null = null
+  memoryContext: MemoryContext | null = null,
+  linkData: any = null
 ): Promise<TransactionResponse> {
   // Allowed model names (safe on v1beta)
   const allowedModels = ['gemini-2.5-flash', 'gemini-1.5-pro'] as const;
@@ -121,25 +127,27 @@ export async function analyzeTransactionIntent(
     // Performance timing
     console.time('AI_Response');
 
-    // Format history for the prompt (concise)
+    // Format history for the prompt (concise) - current session only
     let historyContext = '';
     if (history && history.length > 0) {
       const historyLines = history.slice(-5).map((msg: any) => {
         const role = msg.role === 'user' ? 'U' : 'A';
         return `${role}: ${msg.content}`;
       });
-      historyContext = `Context: ${historyLines.join(' | ')}\n\n`;
+      historyContext = `Current Session Context: ${historyLines.join(' | ')}\n\n`;
     }
 
-    // Format memory context for personalization
+    // Format memory context for personalization (from Walrus)
     let memoryPrompt = '';
     if (memoryContext) {
       const parts: string[] = [];
       
+      // User profile summary
       if (memoryContext.aiSummary) {
         parts.push(`User Profile: ${memoryContext.aiSummary}`);
       }
       
+      // Recent blockchain activities
       if (memoryContext.recentActivities && memoryContext.recentActivities.length > 0) {
         const activitySummary = memoryContext.recentActivities
           .map(a => `${a.type}: ${a.amount || ''} SUI ${a.status === 'success' ? '✓' : '✗'}`)
@@ -147,8 +155,80 @@ export async function analyzeTransactionIntent(
         parts.push(`Recent Activity: ${activitySummary}`);
       }
       
+      // Previous chat history from Walrus (for personalization)
+      if (memoryContext.chatHistory && memoryContext.chatHistory.length > 0) {
+        // Get last 10 messages from previous sessions (excluding current session)
+        const previousChats = memoryContext.chatHistory
+          .slice(-10)
+          .map(msg => {
+            const role = msg.role === 'user' ? 'User' : 'VAQI';
+            // Truncate long messages for context
+            const content = msg.content.length > 100 
+              ? msg.content.substring(0, 100) + '...' 
+              : msg.content;
+            return `${role}: ${content}`;
+          })
+          .join('\n');
+        parts.push(`Previous Conversations:\n${previousChats}`);
+      }
+      
       if (parts.length > 0) {
-        memoryPrompt = `\n=== USER MEMORY (use for personalization) ===\n${parts.join('\n')}\n\n`;
+        memoryPrompt = `\n=== USER MEMORY (use for personalization and context) ===\n${parts.join('\n\n')}\n\n`;
+      }
+    }
+
+    // Format link data for analysis (when link is detected)
+    let linkPrompt = '';
+    if (linkData && linkData.url) {
+      // Handle case where link fetch failed but URL is known
+      if (linkData.error) {
+        linkPrompt = `\n=== 🔗 LINK DETECTED (Fetch Failed) ===\n
+The user provided a link: ${linkData.url}
+
+⚠️ Note: The link could not be fetched (${linkData.error}), but the user wants information about it.
+You should still provide helpful information about the URL structure, domain, and general advice about interacting with such links.\n\n`;
+      } else {
+        // Link was successfully fetched - provide full analysis
+        const linkParts: string[] = [];
+        linkParts.push(`URL: ${linkData.url}`);
+        if (linkData.title) {
+          linkParts.push(`Title: ${linkData.title}`);
+        }
+        if (linkData.description) {
+          linkParts.push(`Description: ${linkData.description}`);
+        }
+        if (linkData.content) {
+          // Truncate content to 2000 chars for prompt
+          const content = linkData.content.length > 2000 
+            ? linkData.content.substring(0, 2000) + '...' 
+            : linkData.content;
+          linkParts.push(`Content:\n${content}`);
+        }
+        linkPrompt = `\n=== 🔗 LINK ANALYSIS REQUEST - CRITICAL INSTRUCTION ===\n
+The user has provided a link and wants you to ANALYZE IT. Link data has been fetched and provided below.
+
+${linkParts.join('\n\n')}
+
+🚨🚨🚨 CRITICAL SYSTEM INSTRUCTION 🚨🚨🚨
+YOU ARE CAPABLE OF ANALYZING LINKS. The link content has ALREADY been fetched server-side and provided to you above.
+This is NOT a security restriction - you HAVE the content. You MUST analyze it.
+
+ABSOLUTE REQUIREMENTS:
+1. ✅ YOU MUST analyze the link content - it's provided above, read it
+2. ✅ Identify what type of website/application this is (dApp, airdrop, claim page, marketplace, etc.)
+3. ✅ If it's Sui-related, explain what it does, its purpose, and provide legitimacy assessment
+4. ✅ Provide specific insights about the content (title, description, main features, functionality)
+5. ✅ Give actionable advice: Is it safe? What does it do? Should the user interact with it?
+6. ✅ Reference specific details from the content above in your response
+7. ✅ Be thorough and helpful - the user wants your expert analysis
+
+ABSOLUTE PROHIBITIONS:
+❌ DO NOT say "I cannot analyze links" - you CAN and the content is above
+❌ DO NOT say "I cannot access external URLs" - the content is already fetched
+❌ DO NOT say "for security reasons" - this is a feature, not a restriction
+❌ DO NOT refuse - analyze the content provided above
+
+The user expects a detailed, expert analysis. The link content is in the prompt above - analyze it now.\n\n`;
       }
     }
 
@@ -180,7 +260,14 @@ export async function analyzeTransactionIntent(
     }
 
     // Comprehensive Sui Expert prompt with multilingual support
-    const prompt = `${historyContext}${memoryPrompt}You are "VAQI," the ultimate Sui Blockchain Expert and friendly AI companion.
+    // Add system override for link analysis if linkData is present
+    const linkAnalysisOverride = linkData && linkData.url && !linkData.error 
+      ? '\n🚨🚨🚨 SYSTEM OVERRIDE - LINK ANALYSIS CAPABILITY ACTIVE 🚨🚨🚨\nYOU HAVE THE ABILITY TO ANALYZE EXTERNAL LINKS. Link content has been fetched and provided above.\nYOU MUST analyze it. DO NOT refuse. DO NOT say you cannot. This is a core feature.\nThe link content is ALREADY in the prompt above - read it and analyze it NOW.\n\n'
+      : linkData && linkData.url && linkData.error
+      ? '\n⚠️ LINK DETECTED: URL provided but fetch failed. Still provide helpful analysis based on URL structure.\n\n'
+      : '';
+    
+    const prompt = `${historyContext}${memoryPrompt}${linkPrompt}${linkAnalysisOverride}You are "VAQI," the ultimate Sui Blockchain Expert and friendly AI companion.
 
 ${styleInstruction}
 
@@ -370,25 +457,84 @@ Output ONLY raw JSON (no markdown):
 
     let text = response.text();
 
+    // Check if response is empty or too short
+    if (!text || text.trim().length < 10) {
+      console.error('❌ Empty or too short AI response:', text);
+      console.timeEnd('AI_Response');
+      return getSafeFallbackResponse(userMessage);
+    }
+
     // JSON cleanup using the sanitization helper
     text = cleanJsonOutput(text);
 
-    // Graceful JSON parsing with error handling
+    // Check again after cleaning
+    if (!text || text.trim().length < 10) {
+      console.error('❌ Empty response after cleaning:', text);
+      console.timeEnd('AI_Response');
+      return getSafeFallbackResponse(userMessage);
+    }
+
+    // Try to fix incomplete JSON (missing closing braces)
+    function tryFixIncompleteJSON(jsonStr: string): string {
+      let fixed = jsonStr.trim();
+      
+      // Count opening and closing braces
+      const openBraces = (fixed.match(/\{/g) || []).length;
+      const closeBraces = (fixed.match(/\}/g) || []).length;
+      
+      // If missing closing braces, try to add them
+      if (openBraces > closeBraces) {
+        const missing = openBraces - closeBraces;
+        // Try to intelligently close the JSON
+        if (fixed.endsWith('"') || fixed.endsWith(',')) {
+          fixed = fixed.slice(0, -1); // Remove trailing comma or quote
+        }
+        // Add missing closing braces
+        fixed += '\n' + '}'.repeat(missing);
+      }
+      
+      // Check for incomplete strings (unclosed quotes)
+      const openQuotes = (fixed.match(/"/g) || []).length;
+      if (openQuotes % 2 !== 0) {
+        // Odd number of quotes means unclosed string
+        // Try to close it at the end
+        if (!fixed.endsWith('"')) {
+          fixed += '"';
+        }
+      }
+      
+      return fixed;
+    }
+
+    // Graceful JSON parsing with error handling and retry
     let parsedData: any;
     try {
       parsedData = JSON.parse(text);
-    } catch (parseError) {
-      // Log the raw faulty output for debugging
-      console.error('❌ JSON Parse Error - Raw AI Response:');
-      console.error('Original text:', text);
-      console.error('Parse error:', parseError);
-      console.error('------------------------------------------');
-      
-      // Performance timing end
-      console.timeEnd('AI_Response');
-      
-      // Return safe fallback instead of crashing
-      return getSafeFallbackResponse(userMessage);
+    } catch (parseError: any) {
+      // Try to fix incomplete JSON
+      console.warn('⚠️ First parse attempt failed, trying to fix incomplete JSON...');
+      console.warn('Text length:', text.length);
+      console.warn('Text preview (first 200 chars):', text.substring(0, 200));
+      try {
+        const fixedText = tryFixIncompleteJSON(text);
+        parsedData = JSON.parse(fixedText);
+        console.log('✅ Successfully fixed and parsed JSON');
+      } catch (retryError) {
+        // Log the raw faulty output for debugging
+        console.error('❌ JSON Parse Error - Raw AI Response:');
+        console.error('Original text length:', text.length);
+        console.error('Original text (first 500 chars):', text.substring(0, 500));
+        console.error('Original text (last 500 chars):', text.substring(Math.max(0, text.length - 500)));
+        console.error('Parse error:', parseError);
+        console.error('Retry error:', retryError);
+        console.error('------------------------------------------');
+        
+        // Performance timing end
+        console.timeEnd('AI_Response');
+        
+        // Return safe fallback instead of crashing
+        return getSafeFallbackResponse(userMessage);
+      }
     }
     
     // Performance timing end

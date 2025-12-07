@@ -61,6 +61,36 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
   const [selectedModel, setSelectedModel] = useState<ModelType>('gemini-1.5-pro'); // Default to Thinking (Düşünen)
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Memoize Walrus status to prevent unnecessary re-renders
+  const walrusStatus = useMemo(() => {
+    if (!currentAccount?.address) return null;
+    
+    if (isMemorySaving) {
+      return {
+        text: "Walrus'a Kaydediliyor...",
+        color: 'text-amber-500',
+        dotColor: 'bg-amber-500',
+        animate: true,
+      };
+    }
+    
+    if (memory?.blobId) {
+      return {
+        text: 'Walrus Senkron',
+        color: 'text-emerald-500',
+        dotColor: 'bg-emerald-500',
+        animate: false,
+      };
+    }
+    
+    return {
+      text: 'Walrus Bekleniyor',
+      color: 'text-gray-400',
+      dotColor: 'bg-gray-400',
+      animate: false,
+    };
+  }, [currentAccount?.address, isMemorySaving, memory?.blobId]);
+
   const markdownComponents = useMemo(
     () => ({
       code({
@@ -523,6 +553,35 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
     }
   };
 
+  // Helper function to extract URL from text
+  const extractUrl = (text: string): string | null => {
+    const urlRegex = /(https?:\/\/[^\s]+)/gi;
+    const matches = text.match(urlRegex);
+    return matches && matches.length > 0 ? matches[0] : null;
+  };
+
+  // Helper function to detect usage commands (Turkish + English)
+  const hasUsageCommand = (text: string): boolean => {
+    const usageCommands = [
+      // Turkish commands
+      'kullan', 'kullanır mısın', 'kullanabilir misin', 'kullanır mısın',
+      'aç', 'açabilir misin', 'açar mısın', 'açsana',
+      'git', 'gidebilir misin', 'gider misin', 'gitsene',
+      'analiz et', 'analiz', 'analiz eder misin', 'analiz yap',
+      'incele', 'inceleme yap', 'inceleyebilir misin',
+      'kontrol et', 'kontrol eder misin', 'kontrol',
+      'bak', 'bakabilir misin', 'bakıver',
+      'göster', 'gösterebilir misin', 'gösterir misin',
+      // English commands
+      'use', 'use this', 'use it', 'use the link',
+      'open', 'open it', 'open this', 'open the link',
+      'go', 'go to', 'visit', 'check', 'analyze', 'analyze this',
+      'examine', 'inspect', 'review', 'look at', 'show me'
+    ];
+    const lowerText = text.toLowerCase();
+    return usageCommands.some(cmd => lowerText.includes(cmd));
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
@@ -542,6 +601,68 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
       // Performance timing
       console.time('API_Request_Total');
       
+      // Check if message contains URL - always analyze if URL is present
+      const url = extractUrl(userMessage.content);
+      const hasCommand = hasUsageCommand(userMessage.content);
+      // Always analyze if URL is present - user likely wants analysis
+      const shouldAnalyzeLink = url !== null;
+      
+      let linkData = null;
+      if (shouldAnalyzeLink && url) {
+        console.log('🔗 [Link] Detected URL, analyzing link...', {
+          url,
+          hasCommand,
+          messageLength: userMessage.content.length,
+        });
+        try {
+          const linkResponse = await fetch('/api/analyze/link', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ url }),
+          });
+
+          if (linkResponse.ok) {
+            linkData = await linkResponse.json();
+            console.log('✅ [Link] Successfully analyzed link:', {
+              url: linkData.url,
+              title: linkData.title || 'No title',
+              description: linkData.description || 'No description',
+              contentLength: linkData.content?.length || 0,
+              status: linkResponse.status,
+            });
+          } else {
+            const errorData = await linkResponse.json();
+            console.warn('⚠️ [Link] Failed to analyze link:', {
+              url,
+              status: linkResponse.status,
+              error: errorData.error,
+              details: errorData.details,
+            });
+            // Continue with normal flow even if link analysis fails
+            // But we'll still pass the URL to AI so it knows about it
+            linkData = { url, error: errorData.error };
+          }
+        } catch (linkError: any) {
+          console.error('❌ [Link] Error analyzing link:', {
+            url,
+            error: linkError.message,
+            stack: linkError.stack,
+          });
+          // Continue with normal flow even if link analysis fails
+          // But we'll still pass the URL to AI so it knows about it
+          linkData = { url, error: linkError.message || 'Network error' };
+        }
+      } else if (url && !shouldAnalyzeLink) {
+        // URL detected but no explicit command - log for debugging
+        console.log('🔗 [Link] URL detected but no analysis triggered:', {
+          url,
+          messageLength: userMessage.content.length,
+          hasCommand,
+        });
+      }
+      
       // Prepare chat history (last 10 messages, excluding the current one we just added)
       const historyMessages = messages.slice(-10).map(msg => ({
         role: msg.role === 'user' ? 'user' as const : 'model' as const,
@@ -560,7 +681,9 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
           memoryContext: memory ? {
             aiSummary: memory.aiSummary,
             recentActivities: memory.activityLogs.slice(-5), // Last 5 activities
+            chatHistory: memory.chatHistory.slice(-20), // Last 20 messages from previous sessions
           } : null,
+          linkData: linkData, // Include analyzed link data
         }),
       });
 
@@ -783,26 +906,10 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
           </div>
           <div className="text-center mt-3 flex items-center justify-center gap-3">
               <span className="text-[10px] text-gray-400 font-medium uppercase tracking-widest opacity-60">Powered by Sui Blockchain & Gemini AI</span>
-              {currentAccount?.address && (
-                <span className={`text-[10px] font-medium uppercase tracking-wider flex items-center gap-1 ${
-                  isMemorySaving ? 'text-amber-500' : memory?.blobId ? 'text-emerald-500' : 'text-gray-400'
-                }`}>
-                  {isMemorySaving ? (
-                    <>
-                      <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse" />
-                      Walrus'a Kaydediliyor...
-                    </>
-                  ) : memory?.blobId ? (
-                    <>
-                      <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full" />
-                      Walrus Senkron
-                    </>
-                  ) : (
-                    <>
-                      <span className="w-1.5 h-1.5 bg-gray-400 rounded-full" />
-                      Walrus Bekleniyor
-                    </>
-                  )}
+              {walrusStatus && (
+                <span className={`text-[10px] font-medium uppercase tracking-wider flex items-center gap-1 ${walrusStatus.color}`}>
+                  <span className={`w-1.5 h-1.5 ${walrusStatus.dotColor} rounded-full ${walrusStatus.animate ? 'animate-pulse' : ''}`} />
+                  {walrusStatus.text}
                 </span>
               )}
           </div>

@@ -27,9 +27,15 @@ npm install
 `.env.local` dosyası oluşturun:
 ```
 GOOGLE_API_KEY=your_google_api_key_here
+
+# Optional: Walrus endpoints (defaults to testnet if not set)
+NEXT_PUBLIC_WALRUS_PUBLISHER=https://publisher.walrus-testnet.walrus.space
+NEXT_PUBLIC_WALRUS_AGGREGATOR=https://aggregator.walrus-testnet.walrus.space
 ```
 
-**Not:** Google API anahtarınızı [Google AI Studio](https://makersuite.google.com/app/apikey) üzerinden alabilirsiniz.
+**Not:** 
+- Google API anahtarınızı [Google AI Studio](https://makersuite.google.com/app/apikey) üzerinden alabilirsiniz.
+- Walrus URL'leri opsiyoneldir. Belirtilmezse testnet URL'leri kullanılır.
 
 3. Geliştirme sunucusunu başlatın:
 ```bash

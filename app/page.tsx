@@ -1,16 +1,21 @@
 'use client';
 
-import { ConnectButton } from '@mysten/dapp-kit';
+import { ConnectButton, useCurrentAccount } from '@mysten/dapp-kit';
 import { ChatInterface } from '@/components/chat/ChatInterface';
 import { DashboardPanel } from '@/components/dashboard/DashboardPanel';
+import { WalletRequiredModal } from '@/components/WalletRequiredModal';
 import { useEffect, useState } from 'react';
 import type { TransactionResponse } from '@/lib/schemas/transaction';
 import { Moon, Sun } from 'lucide-react';
 
 export default function Home() {
+  const currentAccount = useCurrentAccount();
   const [transactionIntent, setTransactionIntent] = useState<TransactionResponse | null>(null);
   const [transactionDigest, setTransactionDigest] = useState<string | null>(null);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  
+  // Check if wallet is connected
+  const isWalletConnected = !!currentAccount?.address;
 
   // Load theme from localStorage or system preference
   useEffect(() => {
@@ -84,7 +89,9 @@ export default function Home() {
       </div>
 
       {/* Ana Grid Yapısı */}
-      <div className="z-10 w-full max-w-7xl grid grid-cols-1 lg:grid-cols-12 gap-6 min-h-[75vh]">
+      <div className={`z-10 w-full max-w-7xl grid grid-cols-1 lg:grid-cols-12 gap-6 min-h-[75vh] transition-all duration-300 ${
+        !isWalletConnected ? 'blur-md pointer-events-none opacity-50' : ''
+      }`}>
         
         {/* Sol Panel: Chat (Daha Geniş - 8 birim) */}
         <div className="lg:col-span-8 h-full shadow-2xl shadow-blue-900/5 rounded-3xl overflow-hidden border border-white/40 dark:border-white/10 backdrop-blur-2xl bg-white/35 dark:bg-slate-900/55 transition-all duration-300 hover:shadow-blue-500/10">
@@ -104,6 +111,9 @@ export default function Home() {
            />
         </div>
       </div>
+
+      {/* Wallet Required Modal */}
+      <WalletRequiredModal isOpen={!isWalletConnected} />
     </main>
   );
 }

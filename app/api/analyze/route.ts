@@ -11,12 +11,13 @@ export async function POST(req: Request) {
     
     // 1. Gelen veriyi okumayı dene
     const body = await req.json();
-    const { message, history = [], model = 'gemini-2.5-flash', memoryContext = null } = body;
+    const { message, history = [], model = 'gemini-2.5-flash', memoryContext = null, linkData = null } = body;
 
     console.log('📩 Kullanıcı Mesajı:', message);
     console.log('📚 Chat History:', history.length, 'messages');
     console.log('🤖 Selected Model (raw):', model);
     console.log('🧠 Memory Context:', memoryContext ? 'Present' : 'None');
+    console.log('🔗 Link Data:', linkData ? 'Present' : 'None');
 
     if (!message) {
       throw new Error('Mesaj içeriği boş geldi!');
@@ -24,7 +25,7 @@ export async function POST(req: Request) {
 
     // 2. Yapay Zeka Servisini Çağır
     console.log('🤖 AI Servisi Çağırılıyor...');
-    const result = await analyzeTransactionIntent(message, history, model, memoryContext);
+    const result = await analyzeTransactionIntent(message, history, model, memoryContext, linkData);
     
     console.timeEnd('API_Route_Total');
 
