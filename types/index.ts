@@ -15,4 +15,52 @@ export type TransactionResponse = {
 // Legacy type for backward compatibility
 export type TransactionIntent = TransactionResponse;
 
+// Chat Message for memory
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: number;
+}
+
+// Activity Log Entry
+export interface ActivityLogEntry {
+  type: 'TRANSFER' | 'BATCH_TRANSFER' | 'DEFI_SUPPLY' | 'SWAP' | 'STAKE';
+  digest: string;
+  amount?: string;
+  recipient?: string;
+  recipients?: string[];
+  timestamp: number;
+  status: 'success' | 'failed';
+}
+
+// Contact for Address Book
+export interface Contact {
+  name: string;
+  address: string;
+}
+
+// Wallet Memory - stored on Walrus
+export interface WalletMemory {
+  walletAddress: string;
+  chatHistory: ChatMessage[];
+  aiSummary: string;
+  activityLogs: ActivityLogEntry[];
+  contacts: Contact[];
+  lastUpdated: number;
+  blobId?: string;
+}
+
+// Walrus blob response
+export interface WalrusUploadResponse {
+  newlyCreated?: {
+    blobObject: {
+      id: string;
+      blobId: string;
+    };
+  };
+  alreadyCertified?: {
+    blobId: string;
+  };
+}
+
 

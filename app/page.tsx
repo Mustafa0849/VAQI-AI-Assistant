@@ -61,7 +61,7 @@ export default function Home() {
             {/* Buraya küçük bir logo ikonu eklenebilir */}
             <div className="w-3 h-3 rounded-full bg-blue-500 animate-pulse" />
             <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-cyan-500">
-                VAQI Interface
+                VAQI Copilot
             </h1>
         </div>
         

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import Image from 'next/image';
 import { Send, Loader2, BookOpen, X, Trash2, Plus, Globe } from 'lucide-react';
 import type { TransactionResponse } from '@/lib/schemas/transaction';
@@ -9,6 +9,12 @@ import { Transaction } from '@mysten/sui/transactions';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { ModelSelector, type ModelType } from '@/components/ModelSelector';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { useWalletMemory } from '@/hooks/useWalletMemory';
+import type { ChatMessage, ActivityLogEntry } from '@/types';
 
 interface Message {
   id: string;
@@ -32,6 +38,17 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
   const { mutate: signAndExecuteTransaction, isPending: isTransactionPending } = useSignAndExecuteTransaction();
   const currentAccount = useCurrentAccount();
   
+  // Walrus Memory Hook
+  const { 
+    memory, 
+    isLoading: isMemoryLoading, 
+    isSaving: isMemorySaving,
+    addChatMessage: addToWalrusMemory,
+    addActivityLog,
+    updateAiSummary,
+    updateContacts: updateWalrusContacts,
+  } = useWalletMemory();
+  
   // Address Book State
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [isAddressBookOpen, setIsAddressBookOpen] = useState(false);
@@ -41,8 +58,58 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<ModelType>('gemini-2.5-flash'); // Default to Flash
+  const [selectedModel, setSelectedModel] = useState<ModelType>('gemini-1.5-pro'); // Default to Thinking (Düşünen)
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const markdownComponents = useMemo(
+    () => ({
+      code({
+        inline,
+        className,
+        children,
+        ...props
+      }: {
+        inline?: boolean;
+        className?: string;
+        children?: React.ReactNode;
+      }) {
+        const match = /language-(\w+)/.exec(className || '');
+        const language = match?.[1] || 'typescript';
+        if (inline) {
+          return (
+            <code
+              className={`rounded border border-blue-500/40 bg-slate-900/70 px-1.5 py-0.5 text-[13px] font-mono text-blue-100 shadow-sm ${className || ''}`}
+              {...props}
+            >
+              {children}
+            </code>
+          );
+        }
+        return (
+          <div className="rounded-2xl border border-blue-500/40 bg-slate-950/90 shadow-2xl overflow-hidden ring-1 ring-blue-500/15">
+            <div className="px-4 py-2 text-xs font-semibold uppercase tracking-wide text-blue-200/80 bg-blue-500/10 border-b border-blue-500/20">
+              Code
+            </div>
+            <SyntaxHighlighter
+              language={language}
+              style={oneDark}
+              PreTag="div"
+              customStyle={{
+                borderRadius: 0,
+                padding: 16,
+                margin: 0,
+                background: 'transparent',
+              }}
+              {...props}
+            >
+              {String(children).replace(/\n$/, '')}
+            </SyntaxHighlighter>
+          </div>
+        );
+      },
+    }),
+    []
+  );
 
   // Get wallet-specific storage key
   const getStorageKey = (): string | null => {
@@ -50,11 +117,32 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
     return `sui_address_book_${currentAccount.address}`;
   };
 
-  // Load contacts from localStorage when wallet connects or changes
+  // Load contacts from Walrus (priority) or localStorage (fallback)
   useEffect(() => {
+    if (!currentAccount?.address) {
+      setContacts([]);
+      return;
+    }
+
+    // Priority 1: Load from Walrus memory
+    if (memory?.contacts && memory.contacts.length > 0) {
+      console.log(`✅ Loaded ${memory.contacts.length} contacts from Walrus`);
+      setContacts(memory.contacts);
+      // Also sync to localStorage for fast access
+      const storageKey = getStorageKey();
+      if (storageKey) {
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(memory.contacts));
+        } catch (e) {
+          console.error('Failed to sync contacts to localStorage:', e);
+        }
+      }
+      return;
+    }
+
+    // Priority 2: Fallback to localStorage
     const storageKey = getStorageKey();
     if (!storageKey) {
-      // No wallet connected, clear contacts
       setContacts([]);
       return;
     }
@@ -64,18 +152,19 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
       try {
         const parsedContacts = JSON.parse(savedContacts);
         setContacts(parsedContacts);
-        if (currentAccount?.address) {
-          console.log(`✅ Loaded ${parsedContacts.length} contacts for wallet ${currentAccount.address.slice(0, 6)}...`);
+        console.log(`✅ Loaded ${parsedContacts.length} contacts from localStorage`);
+        // Sync to Walrus if memory exists
+        if (memory) {
+          updateWalrusContacts(parsedContacts);
         }
       } catch (e) {
         console.error('Failed to load contacts from localStorage:', e);
         setContacts([]);
       }
     } else {
-      // No saved contacts for this wallet, start with empty list
       setContacts([]);
     }
-  }, [currentAccount?.address]); // Reload when wallet address changes
+  }, [currentAccount?.address, memory?.contacts, memory]); // Reload when wallet or memory changes
 
   // Save contacts to localStorage whenever they change (only if wallet is connected)
   useEffect(() => {
@@ -124,13 +213,43 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
   }, [messages]);
 
   const addMessageToChat = (content: string, role: 'user' | 'assistant') => {
+    const timestamp = Date.now();
     const message: Message = {
-      id: Date.now().toString(),
+      id: timestamp.toString(),
       role,
       content,
-      timestamp: new Date(),
+      timestamp: new Date(timestamp),
     };
     setMessages((prev) => [...prev, message]);
+    
+    // Also save to Walrus memory
+    const walrusMessage: ChatMessage = {
+      role,
+      content,
+      timestamp,
+    };
+    addToWalrusMemory(walrusMessage);
+  };
+
+  const formatAssistantContent = (content: string): string => {
+    if (!content || content.includes('```')) {
+      return content;
+    }
+
+    const trimmed = content.trim();
+    const looksLikeMove =
+      /(module\s+[A-Za-z0-9_]+::[A-Za-z0-9_]+|public\s+entry\s+fun|struct\s+[A-Za-z0-9_]+\s+has\s+)/i.test(trimmed);
+    const looksLikeTs =
+      /(import\s+{?\s*Transaction\s*}?\s+from\s+['"]@mysten\/sui\/transactions['"]|new\s+Transaction\s*\(|useSignAndExecuteTransaction\s*\(|@mysten\/dapp-kit)/i.test(
+        trimmed
+      );
+
+    const lang = looksLikeMove ? 'move' : looksLikeTs ? 'typescript' : null;
+    if (!lang) {
+      return content;
+    }
+
+    return `\`\`\`${lang}\n${trimmed}\n\`\`\``;
   };
 
   const handleAIResponse = (responseData: TransactionResponse | string) => {
@@ -141,7 +260,8 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
         typeof responseData === 'string' ? JSON.parse(responseData) : responseData;
 
       // 1. Önce yapay zekanın mesajını ekrana bas (Hem chat hem işlem için)
-      addMessageToChat(aiData.data.summary, 'assistant');
+      const formattedSummary = formatAssistantContent(aiData.data.summary);
+      addMessageToChat(formattedSummary, 'assistant');
 
       // 2. Eğer türü TRANSACTION ise cüzdan işlemini tetikle
       if (aiData.type === 'TRANSACTION') {
@@ -206,6 +326,15 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
                     `✅ Transaction successful! Sent ${amount} SUI to ${recipientDisplay}\nDigest: ${digest}`,
                     'assistant'
                   );
+                  // Log activity to Walrus
+                  addActivityLog({
+                    type: 'TRANSFER',
+                    digest,
+                    amount,
+                    recipient: address,
+                    timestamp: Date.now(),
+                    status: 'success',
+                  });
                   // Notify parent about successful transaction
                   if (onTransactionSuccess) {
                     onTransactionSuccess(digest);
@@ -219,6 +348,15 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
                     `❌ Transaction failed: ${errorMessage}`,
                     'assistant'
                   );
+                  // Log failed activity
+                  addActivityLog({
+                    type: 'TRANSFER',
+                    digest: '',
+                    amount,
+                    recipient: address,
+                    timestamp: Date.now(),
+                    status: 'failed',
+                  });
                   onTransactionGenerated(null);
                 },
               }
@@ -314,6 +452,14 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
                     `✅ Successfully Supplied ${amount} SUI to Scallop Protocol (Simulated)\nDigest: ${digest}`,
                     'assistant'
                   );
+                  // Log DeFi activity to Walrus
+                  addActivityLog({
+                    type: 'DEFI_SUPPLY',
+                    digest,
+                    amount,
+                    timestamp: Date.now(),
+                    status: 'success',
+                  });
                   
                   // Notify parent about successful transaction
                   if (onTransactionSuccess) {
@@ -411,6 +557,10 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
           message: userMessage.content,
           history: historyMessages,
           model: selectedModel,
+          memoryContext: memory ? {
+            aiSummary: memory.aiSummary,
+            recentActivities: memory.activityLogs.slice(-5), // Last 5 activities
+          } : null,
         }),
       });
 
@@ -465,14 +615,21 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
       return;
     }
 
-    setContacts([...contacts, { name: newContactName.trim(), address: newContactAddress.trim() }]);
+    const newContact = { name: newContactName.trim(), address: newContactAddress.trim() };
+    const updatedContacts = [...contacts, newContact];
+    setContacts(updatedContacts);
     setNewContactName('');
     setNewContactAddress('');
+    // Update Walrus memory
+    updateWalrusContacts(updatedContacts);
     addMessageToChat(`✅ Contact '${newContactName.trim()}' added to address book!`, 'assistant');
   };
 
   const handleDeleteContact = (name: string) => {
-    setContacts(contacts.filter(c => c.name !== name));
+    const updatedContacts = contacts.filter(c => c.name !== name);
+    setContacts(updatedContacts);
+    // Update Walrus memory
+    updateWalrusContacts(updatedContacts);
     addMessageToChat(`✅ Contact '${name}' removed from address book.`, 'assistant');
   };
 
@@ -518,15 +675,15 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
       </div>
 
       {/* 2. MESAJ ALANI */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
+      <div className="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth chat-scroll">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center p-8 text-center select-none animate-in fade-in duration-1000">
-            <div className="relative w-40 h-40 mb-8 animate-float">
+            <div className="relative w-40 h-40 mb-8 animate-float rounded-full overflow-hidden border-2 border-white/30 shadow-xl">
               <Image 
                 src="/vaqi-avatar.png" 
                 alt="VAQI Logo" 
                 fill
-                className="object-contain drop-shadow-2xl"
+                className="object-cover drop-shadow-2xl"
                 priority
               />
             </div>
@@ -567,7 +724,11 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
                     }
                   `}
                 >
-                  <p className="whitespace-pre-wrap">{msg.content}</p>
+                  <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap break-words">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                      {msg.content}
+                    </ReactMarkdown>
+                  </div>
                 </div>
                 <span className={`text-[10px] text-gray-400 mt-1 px-1 ${msg.role === 'user' ? 'text-right' : 'text-left'}`}>
                   {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -620,8 +781,30 @@ export function ChatInterface({ onTransactionGenerated, onRecipientResolved, onT
               )}
             </Button>
           </div>
-          <div className="text-center mt-3">
+          <div className="text-center mt-3 flex items-center justify-center gap-3">
               <span className="text-[10px] text-gray-400 font-medium uppercase tracking-widest opacity-60">Powered by Sui Blockchain & Gemini AI</span>
+              {currentAccount?.address && (
+                <span className={`text-[10px] font-medium uppercase tracking-wider flex items-center gap-1 ${
+                  isMemorySaving ? 'text-amber-500' : memory?.blobId ? 'text-emerald-500' : 'text-gray-400'
+                }`}>
+                  {isMemorySaving ? (
+                    <>
+                      <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse" />
+                      Walrus'a Kaydediliyor...
+                    </>
+                  ) : memory?.blobId ? (
+                    <>
+                      <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full" />
+                      Walrus Senkron
+                    </>
+                  ) : (
+                    <>
+                      <span className="w-1.5 h-1.5 bg-gray-400 rounded-full" />
+                      Walrus Bekleniyor
+                    </>
+                  )}
+                </span>
+              )}
           </div>
         </form>
       </div>

@@ -11,6 +11,12 @@ if (!apiKey) {
 
 const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
 
+const generationConfig = {
+  maxOutputTokens: 1024,
+  temperature: 0.75,
+  topP: 0.9,
+};
+
 /**
  * JSON Sanitization Helper
  * Strips markdown code fences and trims whitespace from AI response
@@ -75,16 +81,31 @@ function getSafeFallbackResponse(userMessage: string): TransactionResponse {
   };
 }
 
+// Memory context type for personalization
+interface MemoryContext {
+  aiSummary?: string;
+  recentActivities?: Array<{
+    type: string;
+    digest: string;
+    amount?: string;
+    recipient?: string;
+    timestamp: number;
+    status: string;
+  }>;
+}
+
 export async function analyzeTransactionIntent(
   userMessage: string, 
   history: any[] = [],
-  modelName: string = 'gemini-2.5-flash'
+  modelName: string = 'gemini-2.5-flash',
+  memoryContext: MemoryContext | null = null
 ): Promise<TransactionResponse> {
   // Allowed model names (safe on v1beta)
   const allowedModels = ['gemini-2.5-flash', 'gemini-1.5-pro'] as const;
   const validModelName = allowedModels.includes(modelName as any) ? modelName : 'gemini-2.5-flash';
   
   const model = genAI ? genAI.getGenerativeModel({ model: validModelName }) : null;
+  console.log('🎯 analyzeTransactionIntent using model:', validModelName);
   if (!apiKey || !genAI || !model) {
     return {
       type: 'CHAT',
@@ -110,6 +131,27 @@ export async function analyzeTransactionIntent(
       historyContext = `Context: ${historyLines.join(' | ')}\n\n`;
     }
 
+    // Format memory context for personalization
+    let memoryPrompt = '';
+    if (memoryContext) {
+      const parts: string[] = [];
+      
+      if (memoryContext.aiSummary) {
+        parts.push(`User Profile: ${memoryContext.aiSummary}`);
+      }
+      
+      if (memoryContext.recentActivities && memoryContext.recentActivities.length > 0) {
+        const activitySummary = memoryContext.recentActivities
+          .map(a => `${a.type}: ${a.amount || ''} SUI ${a.status === 'success' ? '✓' : '✗'}`)
+          .join(', ');
+        parts.push(`Recent Activity: ${activitySummary}`);
+      }
+      
+      if (parts.length > 0) {
+        memoryPrompt = `\n=== USER MEMORY (use for personalization) ===\n${parts.join('\n')}\n\n`;
+      }
+    }
+
     // Dynamic Style Instruction based on Model Selection
     let styleInstruction = '';
     let styleReminder = '';
@@ -117,29 +159,28 @@ export async function analyzeTransactionIntent(
     if (validModelName === 'gemini-2.5-flash') {
       styleInstruction = `
 ⚡⚡⚡ CRITICAL STYLE RULE - FAST MODE - YOU MUST FOLLOW THIS ⚡⚡⚡
-- YOUR RESPONSE IN "summary" FIELD MUST BE MAXIMUM 1-2 SENTENCES ONLY.
-- DO NOT write paragraphs. DO NOT explain details. DO NOT add extra information.
-- Be EXTREMELY brief. Answer like a telegram message.
-- If user asks a question, give the shortest possible answer.
-- Example good response: "PTB lets you combine multiple operations in one transaction. ⚡"
-- Example BAD response: "PTB stands for Programmable Transaction Block. It is a powerful feature of Sui that allows you to..." (TOO LONG!)
+- Do all reasoning internally; NEVER show "thinking", steps, or analysis to the user.
+- Respond in 1-3 sentences, ideally 30-60 words total.
+- Be direct and concise; no fluff.
+- If you include code, you MUST wrap it in a single fenced code block with the correct language tag (e.g., \`\`\`typescript ...\`\`\` or \`\`\`move ...\`\`\`); if you forget, regenerate before replying.
+- Absolutely NEVER wrap the JSON itself in code fences. Only the "summary" text may contain the fenced code snippet.
 `;
-      styleReminder = `\n\n⚡ REMINDER: FAST MODE ACTIVE - Your "summary" MUST be MAX 1-2 sentences. Be brief like a telegram!`;
+      styleReminder = `\n\n⚡ REMINDER: Hide reasoning. 1-3 sentences (30-60 words), concise. Single fenced code block only if needed; regenerate if code is unfenced.`;
     } else {
       styleInstruction = `
 🧠🧠🧠 CRITICAL STYLE RULE - THINKING MODE - YOU MUST FOLLOW THIS 🧠🧠🧠
-- YOUR RESPONSE IN "summary" FIELD MUST BE DETAILED AND COMPREHENSIVE (minimum 4-6 sentences).
-- ALWAYS explain the 'WHY' and 'HOW' behind concepts.
-- Provide examples, code snippets when relevant, tips, and interesting context.
-- Use a conversational, educational, storytelling tone.
-- Make the user feel like they're learning from an expert friend.
-- Example: Instead of "Use Cetus for swaps", explain "Cetus is the largest DEX on Sui with concentrated liquidity. It offers better rates for large trades. You can access it at app.cetus.zone. The swap process involves connecting your wallet, selecting tokens, and confirming the transaction..."
+- Do all reasoning internally; NEVER expose "thinking", steps, or analysis to the user.
+- Deliver a deep, narrative explanation: target 12-16 sentences (~220-320 words).
+- Organize as 2-3 rich paragraphs plus optional 4-6 bullet takeaways or next steps.
+- Use fenced code blocks with correct language tags (typescript, move, shell, etc.) for any code; if you forget, regenerate before replying. Do NOT wrap the JSON envelope in fences.
+- Use a conversational, educational tone; teach like an expert friend with trade-offs, why/how, and concrete examples.
+- Prioritize clarity, structure, and actionable advice; avoid fluff.
 `;
-      styleReminder = `\n\n🧠 REMINDER: THINKING MODE ACTIVE - Your "summary" MUST be DETAILED with 4-6+ sentences. Explain thoroughly!`;
+      styleReminder = `\n\n🧠 REMINDER: Hide reasoning; provide only the detailed answer with paragraphs + optional bullets, target 12-16 sentences, code in fenced blocks.`;
     }
 
     // Comprehensive Sui Expert prompt with multilingual support
-    const prompt = `${historyContext}You are "VAQI," the ultimate Sui Blockchain Expert and friendly AI companion.
+    const prompt = `${historyContext}${memoryPrompt}You are "VAQI," the ultimate Sui Blockchain Expert and friendly AI companion.
 
 ${styleInstruction}
 
@@ -278,7 +319,7 @@ Output ONLY raw JSON (no markdown):
 {
   "type": "CHAT" | "TRANSACTION",
   "data": {
-    "summary": "response text IN USER'S LANGUAGE",
+    "summary": "User-facing answer only (no visible reasoning). Follow the style rules above for the selected mode. Use fenced code blocks with language tags for any code. Respond in the user's language. Do NOT wrap this JSON in fences.",
     "action_type": "TRANSFER" | "BATCH_TRANSFER" | "SWAP" | "STAKE" | "DEFI_SUPPLY" | "NONE",
     "params": {
       "amount": "string or null",
@@ -292,7 +333,13 @@ Output ONLY raw JSON (no markdown):
 
     let response;
     try {
-      const result = await model.generateContent(prompt);
+      const result = await model.generateContent({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          ...generationConfig,
+          responseMimeType: 'application/json',
+        },
+      });
       response = await result.response;
     } catch (err: any) {
       // If model not found (404), fallback between flash and pro
