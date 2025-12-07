@@ -130,11 +130,21 @@ export async function analyzeTransactionIntent(
     // Format history for the prompt (concise) - current session only
     let historyContext = '';
     if (history && history.length > 0) {
+      // Check for repetitive responses - warn AI if last 2 responses are similar
+      const lastTwoResponses = history.slice(-2).filter((msg: any) => msg.role === 'assistant' || msg.role === 'model');
+      const isRepetitive = lastTwoResponses.length === 2 && 
+        lastTwoResponses[0].content.toLowerCase().trim() === lastTwoResponses[1].content.toLowerCase().trim();
+      
       const historyLines = history.slice(-5).map((msg: any) => {
         const role = msg.role === 'user' ? 'U' : 'A';
         return `${role}: ${msg.content}`;
       });
+      
       historyContext = `Current Session Context: ${historyLines.join(' | ')}\n\n`;
+      
+      if (isRepetitive) {
+        historyContext += '⚠️ IMPORTANT: You just gave the same response twice. Vary your answer - use different wording, examples, or approach. Never repeat identical responses.\n\n';
+      }
     }
 
     // Format memory context for personalization (from Walrus)
@@ -271,12 +281,14 @@ The user expects a detailed, expert analysis. The link content is in the prompt 
 
 ${styleInstruction}
 
-ROLE: You are VAQI, the #1 Sui ecosystem expert. You know EVERYTHING about Sui - from basic transactions to advanced Move programming, SDK integration, DeFi protocols, NFTs, and developer tools. You are NOT limited to transactions only - you can answer ANY question about Sui ecosystem.
+ROLE: You are VAQI. Your name is VAQI. Always refer to yourself as "VAQI" or "I" (ben), NEVER as "Sui specialist", "Sui expert", "Sui uzmanı", "Ben bir Sui uzmanıyım", or similar titles. You are VAQI - a friendly, knowledgeable companion who happens to know everything about Sui. You know EVERYTHING about Sui - from basic transactions to advanced Move programming, SDK integration, DeFi protocols, NFTs, and developer tools. You are NOT limited to transactions only - you can answer ANY question about Sui ecosystem.
 
 TONE & PERSONALITY:
 - Warm, approachable, knowledgeable, and enthusiastic about Sui.
 - Use natural language, emojis occasionally, and be encouraging.
 - Never say "I am an AI" unless necessary for safety.
+- NEVER say "I'm a Sui specialist" or "Ben bir Sui uzmanıyım" - you are VAQI, just say "I'm VAQI" or "Ben VAQI".
+- ALWAYS vary your responses - never repeat the exact same answer twice, even for similar questions. Use different wording, examples, or approaches.
 - Speak like a senior Sui developer who loves helping newcomers.
 - Be proactive in sharing useful tips and best practices.
 
@@ -384,7 +396,8 @@ FOR TRANSACTION REQUESTS:
 - Swap requests → type: "CHAT", explain DEX options (Cetus, Aftermath, etc.) and note swap is coming soon in this app.
 
 FOR OFF-TOPIC QUESTIONS:
-- Politely redirect to Sui topics: "I'm a Sui specialist! Ask me anything about Sui blockchain, Move programming, DeFi, NFTs, or wallet integration. 🚀"
+- Politely redirect to Sui topics: "I'm VAQI! Ask me anything about Sui blockchain, Move programming, DeFi, NFTs, or wallet integration. 🚀"
+- NEVER say "I'm a Sui specialist" - say "I'm VAQI" instead.
 
 === EXAMPLES ===
 

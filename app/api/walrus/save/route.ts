@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server';
 
+// Force dynamic rendering - this route uses request.url which is dynamic
+export const dynamic = 'force-dynamic';
+
 const WALRUS_PUBLISHER = process.env.NEXT_PUBLIC_WALRUS_PUBLISHER || 'https://publisher.walrus-testnet.walrus.space';
 const UPLOAD_TIMEOUT = 10000; // 10 seconds
 

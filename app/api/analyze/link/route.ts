@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server';
 
+// Force dynamic rendering - this route processes external URLs dynamically
+export const dynamic = 'force-dynamic';
+
 const FETCH_TIMEOUT = 10000; // 10 seconds
 
 /**
